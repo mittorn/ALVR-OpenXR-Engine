@@ -88,8 +88,10 @@ add_dependencies(alxr_engine
 )
 
 set(ALVR_ROOT_DIR ${PROJECT_SOURCE_DIR}/../../../../.. CACHE PATH "Root directory of ALVR source")
-set(ALVR_COMMON_DIR ${ALVR_ROOT_DIR}/alvr/client/android/ALVR-common)
-set(ALVR_OLD_CLIENT_DIR ${ALVR_ROOT_DIR}/alvr/client/android/app/src/main/cpp)
+set(ALVR_COMMON_DIR ${PROJECT_SOURCE_DIR}/common)
+#${ALVR_ROOT_DIR}/alvr/client/android/ALVR-common)
+set(ALVR_OLD_CLIENT_DIR ${PROJECT_SOURCE_DIR}/common)
+#${ALVR_ROOT_DIR}/alvr/client/android/app/src/main/cpp)
 
 file(GLOB_RECURSE ALVR_COMMON_HEADERS ${ALVR_COMMON_DIR}/*.h)
 file(GLOB_RECURSE ALVR_COMMON_SOURCE ${ALVR_COMMON_DIR}/*.c ${ALVR_COMMON_DIR}/*.cpp)

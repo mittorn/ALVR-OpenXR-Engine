@@ -20,7 +20,7 @@
 #include "xr_utils.h"
 #include "interaction_profiles.h"
 #include "timing.h"
-#include "ALVR-common/packet_types.h"
+#include "packet_types.h"
 
 namespace Side {
     constexpr const std::size_t LEFT = 0;
