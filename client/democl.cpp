@@ -181,7 +181,7 @@ typedef struct [[gnu::packed]] connection_accept_s
 	char hostname[56-24];
 } connection_accept_t;
 
-int stream_fd;
+int stream_fd = -1;
 #include <pthread.h>
 
 // rust is shit
@@ -227,6 +227,8 @@ struct [[gnu::packed]] video_buf
 	char buffer[1024*1024];
 };
 
+static bool gStopRequest;
+
 
 void* stream_func(void*)
 {
@@ -261,6 +263,10 @@ void* stream_func(void*)
 		{
 		stream_fd = fd;
 		len = read_packet_ldc(fd, buf+4, sizeof(buf)-4);
+		if(len <= 0)
+		{
+			break;
+		}
 		uint16_t id;
 		memcpy(&id,buf+4,2);
 		if(htons(id)!= 2)
@@ -296,15 +302,20 @@ void* stream_func(void*)
 		//if(htons(id) == 2)
 //			write(1, ((char*)buf)+6, len-6);
 		}
-		sleep(10);
+		stream_fd = -1;
 		close(fd);
+		break; // uncomment if server will need reconnects and implement stream stop request
 	}
+	close(server_fd);
+	printf("Stream closed, thread exiting\n");
+	gStopRequest = true;
+
 	return 0;
 }
 
 static pthread_mutex_t stream_write_lock;
 static pthread_mutex_t control_write_lock;
-int control_fd;
+int control_fd = -1;
 
 
 void request_idr()
@@ -437,6 +448,8 @@ void *control_func(void*)
 	while(true)
 	{
 		size_t len = read_packet_ldc(control_fd, &buffer[0], sizeof(buffer));
+		if(len <= 0)
+			break;
 		printf("Control packed %d %d\n", *(unsigned int*)(&buffer[0]), (int)len - 4);
 		if(*(unsigned int*)(&buffer[0]) == KeepAlive_s)
 		{
@@ -458,6 +471,9 @@ void *control_func(void*)
 		}
 #endif
 	}
+	printf("Control closed, thread exiting\n");
+	gStopRequest = true;
+	return 0;
 
 }
 
@@ -492,8 +508,13 @@ int main()
 		//send_packet_ldc(fd, &ann, sizeof(ann));
 		send_packet_ldc(fd, &hs_answer, sizeof(hs_answer));
 		int len = read_packet_ldc(fd, &buf, sizeof(buf) - 1);
+		if(len <= 0)
+		{
+			printf("Failed to receive handshake\n");
+			close(fd);
+			continue;
+		}
 		printf("%d\n", *(int*)&buf);
-		//write(1, &buf, len);
 		ClientConfigFooter *config = (ClientConfigFooter*)&buf[len - sizeof(ClientConfigFooter)];
 		stream_config.renderConfig.refreshRate = config->fps;
 		stream_config.renderConfig.eyeWidth = config->eye_resolution_x;
@@ -513,6 +534,12 @@ int main()
 		uint32_t answ = StreamReady;
 		send_packet_ldc(fd, &answ, 4);
 		len = read_packet_ldc(fd, &buf, sizeof(buf));
+		if(len <= 0)
+		{
+			printf("Failed to receive config\n");
+			close(fd);
+			continue;
+		}
 		//write(1, &buf, len);
 		//views_config_packet_t vconfig = {ViewsConfig};
 //		vconfig.id = ViewsConfig;
@@ -525,16 +552,23 @@ int main()
 		pthread_t control_thread;
 		pthread_create(&control_thread,0,control_func,0);
 		alxr_set_stream_config(stream_config);
-		bool stop = false;
-		while(!stop)
+		while(!gStopRequest)
 		{
 			bool restart = false;
-			alxr_process_frame(&stop, &restart);
+			alxr_process_frame(&gStopRequest, &restart);
 			alxr_on_tracking_update(false);
 //			usleep(16);
 		}
+		pthread_join(control_thread, 0);
+		pthread_join(control_thread, 0);
+		pthread_join(stream_thread, 0);
+		// openxr program does not stop here (BUG)
+		alxr_request_exit_session();
 		alxr_destroy();
 		close(fd);
+		close(control_fd);
+		close(server_fd);
+		return 0;
 	}
 	return 0;
 }
