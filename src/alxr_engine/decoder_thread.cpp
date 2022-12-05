@@ -11,7 +11,8 @@ bool XrDecoderThread::QueuePacket(const VideoFrame& header, const std::size_t pa
 	LatencyManager::Instance().OnPreVideoPacketRecieved(header);
 
 	bool fecFailure = false, isComplete = true;
-	if (const auto fecQueue = m_fecQueue) {
+	if (m_fecQueue && header.trackingFrameIndex) {
+		const auto fecQueue =  m_fecQueue;
 		fecQueue->addVideoPacket(&header, static_cast<int>(packetSize), fecFailure);
 		if (isComplete = fecQueue->reconstruct()) {
 			const size_t frameBufferSize = fecQueue->getFrameByteSize();
