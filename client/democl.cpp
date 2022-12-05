@@ -8,6 +8,7 @@
 #include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 #include "alxr_engine.h"
 // v19-
 typedef struct [[gnu::packed]] headset_info_s
@@ -490,13 +491,24 @@ int main()
 		char buf[8192];
 		//send_packet_ldc(fd, &ann, sizeof(ann));
 		send_packet_ldc(fd, &hs_answer, sizeof(hs_answer));
-		int len = read_packet_ldc(fd, &buf, sizeof(buf));
+		int len = read_packet_ldc(fd, &buf, sizeof(buf) - 1);
 		printf("%d\n", *(int*)&buf);
 		//write(1, &buf, len);
 		ClientConfigFooter *config = (ClientConfigFooter*)&buf[len - sizeof(ClientConfigFooter)];
 		stream_config.renderConfig.refreshRate = config->fps;
 		stream_config.renderConfig.eyeWidth = config->eye_resolution_x;
 		stream_config.renderConfig.eyeHeight = config->eye_resolution_y;
+#define JSON_F(y,x) if(const char *r = strstr(&buf[8], "\"" #x "\""))y = atof(r + sizeof(#x)+2)
+#define JSON_B(y,x) y = !!strstr(&buf[8], "\"" #x "\":true")
+		JSON_F(stream_config.renderConfig.foveationCenterSizeX, foveation_center_size_x);
+		JSON_F(stream_config.renderConfig.foveationCenterSizeY, foveation_center_size_y);
+		JSON_F(stream_config.renderConfig.foveationCenterShiftX, foveation_center_shift_x);
+		JSON_F(stream_config.renderConfig.foveationCenterShiftY, foveation_center_shift_y);
+		JSON_F(stream_config.renderConfig.foveationEdgeRatioX, foveation_edge_ratio_x);
+		JSON_F(stream_config.renderConfig.foveationEdgeRatioY, foveation_edge_ratio_y);
+		JSON_B(stream_config.renderConfig.enableFoveation, enable_foveated_rendering);
+		JSON_B(stream_config.decoderConfig.enableFEC, enable_fec);
+		stream_config.decoderConfig.codecType = !strstr(&buf[8],"\"codec\":{\"variant\":\"HEVC\"")?H264_CODEC:HEVC_CODEC;
 		
 		uint32_t answ = StreamReady;
 		send_packet_ldc(fd, &answ, 4);
