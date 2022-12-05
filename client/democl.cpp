@@ -37,7 +37,7 @@ typedef struct [[gnu::packed]] VideoStreamingCapabilities_s
 	uint32_t recommended_eye_width;
 	uint32_t recommended_eye_height;
 	uint64_t available_refresh_rates_len; // 1 //5
-	float available_refresh_rates[5];
+	float available_refresh_rates[1];
 	uint32_t microphone_sample_rate;
 
 } VideoStreamingCapabilities_t;
@@ -81,10 +81,15 @@ int send_packet_ldc(int fd, void *buf, size_t len)
 		return ret;
 	return write(fd, buf, len);
 }
+
+// 20.0.0-dev1 fucked up decoder config, disable it to use v19
+#define FUCKUP_DECODER_CONFIG 1
 enum server_control_packet
 {
 	StartStream,
+#if FUCKUP_DECODER_CONFIG
 	InitializeDecoder, // version break
+#endif
 	Restarting,
 	KeepAlive_s,
 	SomeString_s,
@@ -180,8 +185,14 @@ int stream_fd;
 
 // rust is shit
 // ALVR protocol is shit
-// everyone rewriting anything to rust must burn in hell
-// hash results got from debugger
+// is there any reason for making hasher without specified algorithm?
+// although it's documented as unstable, someone will rely on it in protocol
+// is there any reason to use this hasher in protocol although documentation says not to rely on it?
+// but who reads the documentation? it's only dirty paper
+// Rust wants to be safe, but does not have fool-proof for such cases
+// anyone rewriting something to rust for "safety" must burn in hell, memory safety is not panacea, they are in fake "safety"
+// hash values got from debugger because i fauled to find which hasher Rust use for now!
+
 #define USER_HEAD "/user/head"
 #define USER_HEAD_HASH 0x5b90853dc9202538
 #define USER_HAND_LEFT "/user/hand/left"
@@ -209,10 +220,16 @@ unsigned long long path_string_to_hash(const char *path)
 }
 
 
+struct [[gnu::packed]] video_buf
+{
+	VideoFrame header;
+	char buffer[1024*1024];
+};
 
 
 void* stream_func(void*)
 {
+	video_buf decode_buffer = {{9}};
 	//printf("%d\n", sizeof(client_connection_result_accepted_t));
 	int server_fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
 	struct sockaddr_in addr;
@@ -232,7 +249,7 @@ void* stream_func(void*)
 	//close(f);
 	while((fd = accept(server_fd, (sockaddr*)&client, &clientlen)) >= 0)
 	{
-		char buf[1024*1024];
+		char buf[1024*1024*3];
 		//send_packet_ldc(fd, &hs_answer, sizeof(hs_answer));
 //		int len = read_packet_ldc(fd, &buf, sizeof(buf));
 		//write(1, &buf, len);
@@ -242,15 +259,32 @@ void* stream_func(void*)
 		while(1)
 		{
 		stream_fd = fd;
-		len = read_packet_ldc(fd, buf+4, sizeof(buf)-2);
+		len = read_packet_ldc(fd, buf+4, sizeof(buf)-4);
 		uint16_t id;
 		memcpy(&id,buf+4,2);
 		if(htons(id)!= 2)
-		fprintf(stderr,"%d %d\n", htons(id), len);
+		fprintf(stdout,"%d %d %lu\n", htons(id), len, *(uint64_t*)&buf[8]);
 		if(htons(id) == 3)
 		{
-			*((int*)buf) = 9;
-			alxr_on_receive((unsigned char*)&buf,len + 2);
+			/* frames rearranged by rust sender code somehow, but FEC queue may fix it.
+			   video will be broken without enabled fec */
+			VideoFrameHeaderPacket *header = (VideoFrameHeaderPacket*)&buf[10];
+			printf("v%d %d %d %d\n", header->packet_counter, header->tracking_frame_index, header->frame_byte_size, len - sizeof(VideoFrameHeaderPacket) - 6);
+			
+			decode_buffer.header.packetCounter = header->packet_counter;//((VideoFrameHeaderPacket*)&buf[6])->packet_counter;
+			decode_buffer.header.trackingFrameIndex = header->tracking_frame_index;
+			decode_buffer.header.videoFrameIndex = header->video_frame_index;
+			decode_buffer.header.sentTime = header->sent_time;
+			decode_buffer.header.frameByteSize = header->frame_byte_size;
+			decode_buffer.header.fecIndex = header->fec_index;
+			decode_buffer.header.fecPercentage = header->fec_percentage;
+			/// TODO: rework layout to skip this copy
+			memcpy((void*)&decode_buffer.buffer,(void*)(&buf[10] + sizeof(VideoFrameHeaderPacket)), len - sizeof(VideoFrameHeaderPacket) - 6);
+
+
+//			*((int*)&buf[0]) = 9;
+//			*((int*)&buf[4]) = counter;
+			alxr_on_receive((unsigned char*)&decode_buffer, len - sizeof(VideoFrameHeaderPacket) - 6 + sizeof(VideoFrame));
 		}
 		
 //		tracking_packet_t tracking = {0};
@@ -302,12 +336,12 @@ void views_config_send(const ALXREyeInfo *eye)
 	eye->ipd,
 	eye->eyeFov[0].left,
 	eye->eyeFov[0].right,
-	eye->eyeFov[0].bottom,
-	eye->eyeFov[0].top,
+	-eye->eyeFov[0].bottom,
+	-eye->eyeFov[0].top,
 	eye->eyeFov[1].left,
 	eye->eyeFov[1].right,
-	eye->eyeFov[1].bottom,
-	eye->eyeFov[1].top,
+	-eye->eyeFov[1].bottom,
+	-eye->eyeFov[1].top,
 	};
 	send_packet_ldc(control_fd, &vconfig, sizeof(vconfig));
 }
@@ -325,7 +359,6 @@ void input_send(const TrackingInfo *ptr)
 	memcpy(tracking.body.device_motions[0].orientation, &ptr->HeadPose_Pose_Orientation, 4*4);
 	memcpy(tracking.body.device_motions[0].position, &ptr->HeadPose_Pose_Position, 4*3);
 	send_packet_ldc(stream_fd, &tracking, sizeof(tracking));
-	
 }
 
 static ALXRRustCtx ctx = 
@@ -338,9 +371,9 @@ video_error_report_send,
 battery_send,
 set_waiting_next_idr,
 request_idr,
-Vulkan2,
-CPU,
-Unmanaged,
+Vulkan,
+VAAPI,
+Rec2020,
 false,
 false,
 false,
@@ -351,32 +384,40 @@ false
 static float rates[] = {60, 72, 80, 90, 120};
 static ALXRSystemProperties props = 
 {
-"Linux unSafeVR",
+"Linux unSafeXR",
 60,
 rates,
-5,
-1600,
-1600
+1,
+1007,
+896
+};
+
+struct [[gnu::packed]] ClientConfigFooter
+{
+uint32_t eye_resolution_x;
+uint32_t eye_resolution_y;
+float fps;
+uint32_t game_audio_sample_rate;
 };
 
 
 static ALXRStreamConfig stream_config = {
-LocalRefSpace,
+StageRefSpace,
 {
-	1600,
-	1600,
-	60,
-	0.5,
-	0.5,
-	0.1,
+	0,
+	0,
+	0,
 	0.4,
-	10,
-	10,
+	0.35,
+	0.4,
+	0.1,
+	4,
+	5,
 	true
 },
 {
 HEVC_CODEC,
-false,
+true, // fec
 false,
 1
 }
@@ -387,23 +428,21 @@ void init_engine()
 	alxr_init(&ctx, &props);
 }
 
-struct config_buf
-{
-	VideoFrame header;
-	char buffer[4096];
-};
-
 void *control_func(void*)
 {
-	config_buf buf = {{9}};
-	char buffer[1024];
+	video_buf buf = {{9}};
+	char buffer[1024*1024];
+	bool initialized = false;
 	while(true)
 	{
 		size_t len = read_packet_ldc(control_fd, &buffer[0], sizeof(buffer));
 		printf("Control packed %d %d\n", *(unsigned int*)(&buffer[0]), (int)len - 4);
-//		int answ = RequestIdr;
-//		send_packet_ldc(control_fd, &answ, 4);
-		
+		if(*(unsigned int*)(&buffer[0]) == KeepAlive_s)
+		{
+			int answ = RequestIdr;
+//			send_packet_ldc(control_fd, &answ, 4);
+		}
+#if FUCKUP_DECODER_CONFIG
 		if(*(unsigned int*)(&buffer[0]) == InitializeDecoder)
 		{
 			printf("Decoder init!\n");
@@ -411,8 +450,12 @@ void *control_func(void*)
 			buf.header.fecPercentage = 0;
 			buf.header.frameByteSize = len - 4;
 			memcpy(buf.buffer, buffer+4, len - 4);
-			alxr_on_receive((unsigned char*)&buf,sizeof(VideoFrame) + len - 4);
+
+			if(!initialized)
+				alxr_on_receive((unsigned char*)&buf,sizeof(VideoFrame) + len - 4);
+			initialized = true;
 		}
+#endif
 	}
 
 }
@@ -432,7 +475,7 @@ int main()
 	int fd;
 	struct sockaddr_in client;
 	socklen_t clientlen = sizeof(client);
-	client_connection_result_accepted_t hs_answer = {0, 8, {'u','n','S','a','f','e','V','R'}, 0, 0x0100007f, {1, 1600, 1600, 5, {60,72,80,90,120}, 48000}};
+	client_connection_result_accepted_t hs_answer = {0, 8, {'u','n','S','a','f','e','X','R'}, 0, 0x0100007f, {1, 1007, 896, 1, {60}, 48000}};
 	pthread_t stream_thread;
 	pthread_create(&stream_thread, NULL, &stream_func, 0);
 	sleep(1);
@@ -449,11 +492,16 @@ int main()
 		send_packet_ldc(fd, &hs_answer, sizeof(hs_answer));
 		int len = read_packet_ldc(fd, &buf, sizeof(buf));
 		printf("%d\n", *(int*)&buf);
-		write(1, &buf, len);
+		//write(1, &buf, len);
+		ClientConfigFooter *config = (ClientConfigFooter*)&buf[len - sizeof(ClientConfigFooter)];
+		stream_config.renderConfig.refreshRate = config->fps;
+		stream_config.renderConfig.eyeWidth = config->eye_resolution_x;
+		stream_config.renderConfig.eyeHeight = config->eye_resolution_y;
+		
 		uint32_t answ = StreamReady;
 		send_packet_ldc(fd, &answ, 4);
 		len = read_packet_ldc(fd, &buf, sizeof(buf));
-//		write(1, &buf, len);
+		//write(1, &buf, len);
 		//views_config_packet_t vconfig = {ViewsConfig};
 //		vconfig.id = ViewsConfig;
 		//send_packet_ldc(fd, &vconfig, sizeof(vconfig));
@@ -471,6 +519,7 @@ int main()
 			bool restart = false;
 			alxr_process_frame(&stop, &restart);
 			alxr_on_tracking_update(false);
+//			usleep(16);
 		}
 		alxr_destroy();
 		close(fd);
